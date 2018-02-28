@@ -23,12 +23,13 @@ namespace Neo.SmartContract
         // Asset Categories
         private static readonly byte[] SystemAsset = { 0x99 };
         private static readonly byte[] NEP5 = { 0x98 };
-        
+
         // Flags / Byte Constants
         private static readonly byte[] Empty = { };
         private static readonly byte[] Withdrawing = { 0x50 };
 
         // Other Settings
+        private const ulong factor = 100000000;
         private const ulong presaleAmount = 800_000_000 * factor; // private sale amount
         private const ulong saleT1Amount = 150_000_000 * factor; // public sale amount for tier 1
 
@@ -38,6 +39,8 @@ namespace Neo.SmartContract
         private static readonly byte[] neoAssetID = { 155, 124, 255, 218, 166, 116, 190, 174, 15, 147, 14, 190, 96, 133, 175, 144, 147, 229, 254, 86, 179, 74, 92, 34, 12, 205, 207, 110, 252, 51, 111, 197 };
         private static readonly byte[] gasAssetID = { 231, 45, 40, 105, 121, 238, 108, 177, 183, 230, 93, 253, 223, 178, 227, 132, 16, 11, 141, 20, 142, 119, 88, 222, 66, 228, 22, 139, 113, 121, 44, 96 };
 
+        private static StorageContext Context() => Storage.CurrentContext;
+
         public static Object Main(string operation, params object[] args)
         {
             if (Runtime.Trigger == TriggerType.Verification)
@@ -46,7 +49,7 @@ namespace Neo.SmartContract
                 var currentTxn = (Transaction)ExecutionEngine.ScriptContainer;
 
                 // Check that is either owner, or user will invoke application later
-                if (Runtime.CheckWitness(owner)) return true;
+                if (Runtime.CheckWitness(Owner)) return true;
                 if (!IsInvokingApplicationTrigger(currentTxn)) return false;
 
                 // Verify that the contract is initialized
@@ -61,7 +64,7 @@ namespace Neo.SmartContract
                 {
                     // Get amount for each asset
                     var amount = GetAmountForAssetInOutputs(o.AssetId, outputs);
-                    if (!VerifyWithdrawal(amount, o.AssetId, withdrawingAddr)) return false;
+                    if (!VerifyWithdrawal(withdrawingAddr, o.AssetId, amount)) return false;
                 }
                 return true;
             }
@@ -75,7 +78,7 @@ namespace Neo.SmartContract
                         return false;
                     }
                     if (args.Length != 3) return false;
-                    return Initialize((BigInteger)args[0], (BigInteger)args[1], (byte[])args[2]);
+                    return Initialize();
                 }
                 if (GetState() == Pending)
                 {
@@ -87,10 +90,10 @@ namespace Neo.SmartContract
                     if (args.Length != 3) return false;
                     WithdrawAssets((byte[])args[0], (byte[])args[1], (BigInteger)args[2]);
                 }
-                }
                 if (operation == "availableAmountForWithdrawal")
                 {
-                    AvailableAmountForWithdrawal((byte[])args[0]);
+                    if (args.Length != 2) return false;
+                    return AvailableAmountForWithdrawal((byte[])args[0], (byte[])args[1]);
                 }
 
                 // == Owner ==
@@ -122,7 +125,6 @@ namespace Neo.SmartContract
             }
             return false;
         }
-        
         private static bool Initialize()
         {
             if (GetState() != Pending) return false;
@@ -165,30 +167,11 @@ namespace Neo.SmartContract
             return true;
         }
 
-        private static bool PrepareAssetWithdrawal(byte[] holderAddress)
-        {
-            // Check that transaction is signed by the asset holder
-            if (!Runtime.CheckWitness(holderAddress)) return false;
-
-            // Get the key which marks start of withdrawal process
-            var withdrawalKey = WithdrawalKey(holderAddress);
-
-            // Check if already withdrawing
-            if (Storage.Get(Context(), withdrawalKey) != Empty) return false;
-
-            // Set blockheight from which to check for double withdrawals later on
-            Storage.Put(Context(), withdrawalKey, Blockchain.GetHeight());
-
-            Runtime.Log("Prepared for asset withdrawal");
-
-            return true;
-        }
-
         private static BigInteger AvailableAmountForWithdrawal(byte[] address, byte[] assetID)
         {
             var totalWithdrawnKey = TotalWithdrawnKey(address, assetID);
-            var currentTotalWithdrawn = Storage.Get(Context(), TotalWithdrawnKey).AsBigInteger();
-            uint faucetLimit = Storage.Get(Context(), 'faucetLimit').AsBigInteger();
+            var currentTotalWithdrawn = Storage.Get(Context(), totalWithdrawnKey).AsBigInteger();
+            var faucetLimit = Storage.Get(Context(), "faucetLimit").AsBigInteger();
             return faucetLimit - currentTotalWithdrawn;
         }
 
@@ -204,9 +187,9 @@ namespace Neo.SmartContract
             var lastWithdrawalTimeKey = LastWithdrawalTimeKey(address, assetID);
 
             var lastWithdrawalTime = Storage.Get(Context(), lastWithdrawalTimeKey).AsBigInteger();
-            uint currentFaucetInterval = Storage.Get(Context(), 'faucetInterval').AsBigInteger();
-            uint faucetLimit = Storage.Get(Context(), 'faucetLimit').AsBigInteger();
-            
+            var currentFaucetInterval = Storage.Get(Context(), "faucetInterval").AsBigInteger();
+            var faucetLimit = Storage.Get(Context(), "faucetLimit").AsBigInteger();
+
             // Reset Total Withdrawn if time interval passed
             if (Runtime.Time - lastWithdrawalTime > currentFaucetInterval)
             {
@@ -214,7 +197,7 @@ namespace Neo.SmartContract
             }
 
             // Calculate new total withdrawn in this interval
-            var currentTotalWithdrawn = Storage.Get(Context(), TotalWithdrawnKey).AsBigInteger();
+            var currentTotalWithdrawn = Storage.Get(Context(), totalWithdrawnKey).AsBigInteger();
             var newTotal = currentTotalWithdrawn + amount;
 
             if (newTotal < 0 || newTotal > faucetLimit)
@@ -229,12 +212,13 @@ namespace Neo.SmartContract
             return true;
         }
 
-        private static bool ResetWithdrawal(byte[] holderAddress, byte[] assetID)
+        private static bool ResetWithdrawal(byte[] address, byte[] assetID)
         {
-          var totalWithdrawnKey = TotalWithdrawnKey(address, assetID);
-          var lastWithdrawalTimeKey = LastWithdrawalTimeKey(address, assetID);
-          Storage.Put(Context(), totalWithdrawnKey, 0);
-          Storage.Put(Context(), lastWithdrawalTimeKey, Runtime.Time);
+            var totalWithdrawnKey = TotalWithdrawnKey(address, assetID);
+            var lastWithdrawalTimeKey = LastWithdrawalTimeKey(address, assetID);
+            Storage.Put(Context(), totalWithdrawnKey, 0);
+            Storage.Put(Context(), lastWithdrawalTimeKey, Runtime.Time);
+            return true;
         }
 
         private static byte[] GetWithdrawalAddress(Transaction transaction)
@@ -254,8 +238,25 @@ namespace Neo.SmartContract
             return Storage.Get(Context(), "state");
         }
 
+        private static bool IsInvokingApplicationTrigger(Transaction transaction)
+        {
+            // TODO: Implement
+            return true;
+        }
+
+        private static ulong GetAmountForAssetInOutputs(byte[] assetID, TransactionOutput[] outputs)
+        {
+            ulong amount = 0;
+            foreach (var o in outputs)
+            {
+                if (o.AssetId == assetID && o.ScriptHash != ExecutionEngine.ExecutingScriptHash) amount += (ulong)o.Value;
+            }
+
+            return amount;
+        }
+
         private static byte[] TotalWithdrawnKey(byte[] originator, byte[] assetID) => originator.Concat(assetID);
-        private static byte[] LastWithdrawalTimeKey(byte[] originator, byte[] assetID) => originator.Concat(assetID).Concat('time');
+        private static byte[] LastWithdrawalTimeKey(byte[] originator, byte[] assetID) => originator.Concat(assetID).Concat("time".AsByteArray());
         private static byte[] WithdrawalKey(byte[] originator) => originator.Concat(Withdrawing);
     }
 }
