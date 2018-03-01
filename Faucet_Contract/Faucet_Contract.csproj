@@ -60,7 +60,7 @@
     <Content Include="Neo.ConvertTask.dll" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
-  <Import Project="Build.tasks" />
+  <Import Project="build.tasks" />
   <Target Name="AfterBuild">
     <Message Text="Start NeoContract converter, Source File: $(TargetPath)" Importance="high">
     </Message>
