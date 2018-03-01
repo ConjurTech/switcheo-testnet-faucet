@@ -1,4 +1,4 @@
-using Neo.SmartContract.Framework;
+﻿using Neo.SmartContract.Framework;
 using Neo.SmartContract.Framework.Services.Neo;
 using Neo.SmartContract.Framework.Services.System;
 using System;
@@ -7,7 +7,7 @@ using System.Numerics;
 
 namespace Neo.SmartContract
 {
-    public class Token_Faucet : Framework.SmartContract
+    public class Faucet_Contract : Framework.SmartContract
     {
         public delegate object NEP5Contract(string method, object[] args);
 
