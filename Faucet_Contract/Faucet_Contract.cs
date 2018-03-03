@@ -2,6 +2,7 @@
 using Neo.SmartContract.Framework.Services.Neo;
 using Neo.SmartContract.Framework.Services.System;
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Numerics;
 
@@ -57,12 +58,12 @@ namespace Neo.SmartContract
                 // Check that the contract is initialized
                 if (GetState() == Pending) return false;
 
-                // Check that txn is signed
-                if (!Runtime.CheckWitness(withdrawingAddr)) return false;
-
                 ulong totalOut = 0;
                 if (WithdrawalType(currentTxn) == Marking)
                 {
+                    // Check that txn is signed
+                    if (!Runtime.CheckWitness(withdrawingAddr)) return false;
+
                     // Check that inputs are not already reserved
                     foreach (var i in inputs)
                     {
@@ -94,6 +95,9 @@ namespace Neo.SmartContract
                         totalOut += (ulong)o.Value;
                         if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash)
                         {
+                            // Only can withdraw to the marked addr
+                            if (o.ScriptHash != withdrawingAddr) return false;
+
                             // TODO: optimize this using Map
                             var amountWithdrawn = GetAmountForAssetInOutputs(o.AssetId, outputs);
                             if (amountWithdrawn > IndividualCap(o.AssetId)) return false;
@@ -131,11 +135,21 @@ namespace Neo.SmartContract
             {
                 if (WithdrawalType(currentTxn) == Marking)
                 {
+                    // TODO: use Map when avaiable in neo-compiler
+                    // var assets = new Dictionary<byte[], BigInteger>();
+                    BigInteger index = 0;
                     foreach (var o in outputs)
                     {
+                        // assets.TryGetValue(o.AssetId, out BigInteger sum);
+                        var sum = 0;
                         MarkWithdrawal(withdrawingAddr, o.AssetId);
+                        if (sum + o.Value <= IndividualCap(o.AssetId))
+                        {
+                            Storage.Put(Context(), currentTxn.Hash.Concat(index.AsByteArray()), withdrawingAddr);
+                        }
+                        index += 1;
+                        // assets.Add(o.AssetId, sum + o.Value);
                     }
-                    // TODO: allocate only the required utxos
                 }
                 else if (WithdrawalType(currentTxn) == Withdrawing)
                 {
