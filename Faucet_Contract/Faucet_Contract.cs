@@ -45,8 +45,8 @@ namespace Neo.SmartContract
             // Prepare vars
             var currentTxn = (Transaction)ExecutionEngine.ScriptContainer;
             var withdrawingAddr = GetWithdrawalAddress(currentTxn);
-            var withdrawingNEP5 = GetWithdrawalNEP5(currentTxn);
-            var isWithdrawingNEP5 = withdrawingNEP5.Length == 20;
+            var NEP5AssetID = GetWithdrawalNEP5(currentTxn);
+            var isWithdrawingNEP5 = NEP5AssetID.Length == 20;
             var inputs = currentTxn.GetInputs();
             var outputs = currentTxn.GetOutputs();
 
@@ -70,13 +70,14 @@ namespace Neo.SmartContract
                         if (Storage.Get(Context(), i.PrevHash.Concat(((BigInteger)i.PrevIndex).AsByteArray())).Length > 0) return false;
                     }
 
-                    // Check that this is not a DOS
+                    // Check that this is not a DOS and outputs are a valid self-send
                     foreach (var o in outputs)
                     {
                         totalOut += (ulong)o.Value;
                         if (!isWithdrawingNEP5 && !VerifyWithdrawal(withdrawingAddr, o.AssetId)) return false;
+                        if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash) return false;
                     }
-                    if (isWithdrawingNEP5 && outputs.Length > 0) return false;
+                    if (isWithdrawingNEP5 && outputs.Length > 1) return false;
 
                     // Check that there are no splits
                     if (inputs.Length != outputs.Length) return false;
@@ -134,21 +135,29 @@ namespace Neo.SmartContract
             else if (Runtime.Trigger == TriggerType.Application)
             {
                 if (WithdrawalType(currentTxn) == Marking)
-                {
-                    // TODO: use Map when avaiable in neo-compiler
-                    // var assets = new Dictionary<byte[], BigInteger>();
-                    BigInteger index = 0;
-                    foreach (var o in outputs)
+                {                    
+                    if (isWithdrawingNEP5)
                     {
-                        // assets.TryGetValue(o.AssetId, out BigInteger sum);
-                        var sum = 0;
-                        MarkWithdrawal(withdrawingAddr, o.AssetId);
-                        if (sum + o.Value <= IndividualCap(o.AssetId))
+                        MarkWithdrawal(withdrawingAddr, NEP5AssetID);
+                        Storage.Put(Context(), currentTxn.Hash.Concat(new byte[1] { 0 }), withdrawingAddr);
+                    }
+                    else
+                    {
+                        // TODO: use Map when avaiable in neo-compiler
+                        // var assets = new Dictionary<byte[], BigInteger>();
+                        BigInteger index = 0;
+                        foreach (var o in outputs)
                         {
-                            Storage.Put(Context(), currentTxn.Hash.Concat(index.AsByteArray()), withdrawingAddr);
+                            // assets.TryGetValue(o.AssetId, out BigInteger sum);
+                            var sum = 0;
+                            MarkWithdrawal(withdrawingAddr, o.AssetId);
+                            if (sum + o.Value <= IndividualCap(o.AssetId))
+                            {
+                                Storage.Put(Context(), currentTxn.Hash.Concat(index.AsByteArray()), withdrawingAddr);
+                            }
+                            index += 1;
+                            // assets.Add(o.AssetId, sum + o.Value);
                         }
-                        index += 1;
-                        // assets.Add(o.AssetId, sum + o.Value);
                     }
                 }
                 else if (WithdrawalType(currentTxn) == Withdrawing)
