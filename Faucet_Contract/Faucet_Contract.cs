@@ -70,14 +70,23 @@ namespace Neo.SmartContract
                         if (Storage.Get(Context(), i.PrevHash.Concat(((BigInteger)i.PrevIndex).AsByteArray())).Length > 0) return false;
                     }
 
-                    // Check that this is not a DOS and outputs are a valid self-send
-                    foreach (var o in outputs)
+                    // Check that withdrawal is possible, and outputs are a valid self-send
+                    if (isWithdrawingNEP5)
                     {
-                        totalOut += (ulong)o.Value;
-                        if (!isWithdrawingNEP5 && !VerifyWithdrawal(withdrawingAddr, o.AssetId)) return false;
-                        if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash) return false;
+                        totalOut += (ulong)outputs[0].Value;
+                        if (outputs.Length > 1) return false;
+                        if (!VerifyWithdrawal(withdrawingAddr, NEP5AssetID)) return false;
+                        if (outputs[0].ScriptHash != ExecutionEngine.ExecutingScriptHash) return false;
                     }
-                    if (isWithdrawingNEP5 && outputs.Length > 1) return false;
+                    else
+                    {
+                        foreach (var o in outputs)
+                        {
+                            totalOut += (ulong)o.Value;
+                            if (!VerifyWithdrawal(withdrawingAddr, o.AssetId)) return false;
+                            if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash) return false;
+                        }
+                    }
 
                     // Check that there are no splits
                     if (inputs.Length != outputs.Length) return false;
