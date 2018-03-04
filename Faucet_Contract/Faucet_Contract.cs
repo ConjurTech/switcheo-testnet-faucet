@@ -42,6 +42,7 @@ namespace Neo.SmartContract
 
         public static Object Main(string operation, params object[] args)
         {
+            Runtime.Log("in main");
             // Prepare vars
             var currentTxn = (Transaction)ExecutionEngine.ScriptContainer;
             var withdrawingAddr = GetWithdrawalAddress(currentTxn);
@@ -52,11 +53,8 @@ namespace Neo.SmartContract
 
             if (Runtime.Trigger == TriggerType.Verification)
             {
-                // Check that is either owner, or user will invoke application later
-                if (Runtime.CheckWitness(Owner)) return true;
-
-                // Check that the contract is initialized
-                if (GetState() == Pending) return false;
+                // Check that the contract is active
+                if (GetState() != Active) return false;
 
                 ulong totalOut = 0;
                 if (WithdrawalType(currentTxn) == Marking)
@@ -87,9 +85,6 @@ namespace Neo.SmartContract
                             if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash) return false;
                         }
                     }
-
-                    // Check that there are no splits
-                    if (inputs.Length != outputs.Length) return false;
                 }
                 else if (WithdrawalType(currentTxn) == Withdrawing)
                 {
@@ -129,7 +124,8 @@ namespace Neo.SmartContract
                 }
                 else
                 {
-                    return false;
+                    // Only allow owner to withdraw otherwise
+                    return Runtime.CheckWitness(Owner);
                 }
 
                 // Check that there is nothing burnt
@@ -143,10 +139,12 @@ namespace Neo.SmartContract
             }
             else if (Runtime.Trigger == TriggerType.Application)
             {
+                Runtime.Log("Trigger");
                 if (WithdrawalType(currentTxn) == Marking)
                 {                    
                     if (isWithdrawingNEP5)
                     {
+                        Runtime.Log("Marking NEP5");
                         MarkWithdrawal(withdrawingAddr, NEP5AssetID);
                         Storage.Put(Context(), currentTxn.Hash.Concat(new byte[1] { 0 }), withdrawingAddr);
                     }
@@ -154,20 +152,23 @@ namespace Neo.SmartContract
                     {
                         // TODO: use Map when avaiable in neo-compiler
                         // var assets = new Dictionary<byte[], BigInteger>();
+                        Runtime.Log("Marking SystemAsset");
                         BigInteger index = 0;
+                        ulong sum = 0;
                         foreach (var o in outputs)
                         {
                             // assets.TryGetValue(o.AssetId, out BigInteger sum);
-                            var sum = 0;
                             MarkWithdrawal(withdrawingAddr, o.AssetId);
-                            if (sum + o.Value <= IndividualCap(o.AssetId))
+                            if (sum == 0 || sum + (ulong)o.Value <= IndividualCap(o.AssetId))
                             {
+                                Runtime.Log("Reserving...");
                                 Storage.Put(Context(), currentTxn.Hash.Concat(index.AsByteArray()), withdrawingAddr);
                             }
                             index += 1;
                             // assets.Add(o.AssetId, sum + o.Value);
                         }
                     }
+                    return true;
                 }
                 else if (WithdrawalType(currentTxn) == Withdrawing)
                 {
@@ -180,10 +181,12 @@ namespace Neo.SmartContract
                     {
                         if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash) Withdrawn(o.ScriptHash, o.AssetId, o.Value);
                     }
+                    return true;
                 }
                 else if (WithdrawalType(currentTxn) == Transferring)
                 {
                     WithdrawNEP5(withdrawingAddr, GetWithdrawalNEP5(currentTxn));
+                    return true;
                 }
 
                 if (operation == "initialize")
@@ -193,6 +196,7 @@ namespace Neo.SmartContract
                         Runtime.Log("Owner signature verification failed!");
                         return false;
                     }
+                    Runtime.Log("initialized");
                     return Initialize();
                 }
                 if (GetState() == Pending)
@@ -202,7 +206,14 @@ namespace Neo.SmartContract
                 }
                 if (operation == "getIndividualCap")
                 {
-                    return IndividualCap((byte[])args[0]);
+                    Runtime.Log("Get individual cap");
+                    var cap = IndividualCap((byte[])args[0]);
+                    return cap;
+                }
+                if (operation == "getLastWithdrawTime")
+                {
+                    var time = Storage.Get(Context(), LastWithdrawnKey((byte[])args[0], (byte[])args[1])).AsBigInteger();
+                    return time;
                 }
 
                 // == Owner ==
@@ -253,7 +264,7 @@ namespace Neo.SmartContract
             var totalWithdrawn = Storage.Get(Context(), TotalWithdrawnKey(assetID)).AsBigInteger();
             var globalCap = Storage.Get(Context(), GlobalCapKey(assetID)).AsBigInteger();
             var startTime = Storage.Get(Context(), "startTime").AsBigInteger();
-            var intervalsSinceStart = (startTime - Runtime.Time) / interval;
+            var intervalsSinceStart = (startTime - Runtime.Time) / interval + 1;
             if (totalWithdrawn > globalCap * intervalsSinceStart) return false;
 
             return true;
@@ -261,6 +272,12 @@ namespace Neo.SmartContract
 
         private static void MarkWithdrawal(byte[] address, byte[] assetID)
         {
+            Runtime.Log("Checking Last Mark..");
+            var lastWithdrawnKey = LastWithdrawnKey(address, assetID);
+            var lastWithdrawn = Storage.Get(Context(), lastWithdrawnKey).AsBigInteger();
+            if (lastWithdrawn == Runtime.Time) return; // save on Storage.Put
+
+            Runtime.Log("Marking Withdrawal..");
             var totalWithdrawnKey = TotalWithdrawnKey(assetID);
             var totalWithdrawn = Storage.Get(Context(), totalWithdrawnKey).AsBigInteger();
             Storage.Put(Context(), totalWithdrawnKey, totalWithdrawn + IndividualCap(assetID));
@@ -325,7 +342,7 @@ namespace Neo.SmartContract
             var txnAttributes = transaction.GetAttributes();
             foreach (var attr in txnAttributes)
             {
-                if (attr.Usage == 0xa1) return attr.Data.Take(2);
+                if (attr.Usage == 0xa1) return attr.Data.Take(1);
             }
 
             return new byte[0] { };
