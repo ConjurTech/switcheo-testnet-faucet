@@ -37,12 +37,10 @@ namespace Neo.SmartContract
 
         private static StorageContext Context() => Storage.CurrentContext;
         private static byte[] GetState() => Storage.Get(Context(), "state");
-        private static BigInteger FaucetInterval() => Storage.Get(Context(), "faucetInterval").AsBigInteger();
         private static BigInteger IndividualCap(byte[] assetID) => Storage.Get(Context(), IndividualCapKey(assetID)).AsBigInteger();
 
         public static Object Main(string operation, params object[] args)
         {
-            Runtime.Log("in main");
             // Prepare vars
             var currentTxn = (Transaction)ExecutionEngine.ScriptContainer;
             var withdrawingAddr = GetWithdrawalAddress(currentTxn);
@@ -139,7 +137,6 @@ namespace Neo.SmartContract
             }
             else if (Runtime.Trigger == TriggerType.Application)
             {
-                Runtime.Log("Trigger");
                 if (WithdrawalType(currentTxn) == Marking)
                 {                    
                     if (isWithdrawingNEP5)
@@ -234,7 +231,12 @@ namespace Neo.SmartContract
                 }
                 if (operation == "setIndividualCap")
                 {
-                    Storage.Put(Context(), IndividualCapKey((byte[])args[0]), (BigInteger)args[1]); // how much max asset to be withdrawn per time interval
+                    Storage.Put(Context(), IndividualCapKey((byte[])args[0]), (BigInteger)args[1]);
+                    return true;
+                }
+                if (operation == "setGlobalCap")
+                {
+                    Storage.Put(Context(), GlobalCapKey((byte[])args[0]), (BigInteger)args[1]);
                     return true;
                 }
             }
@@ -254,34 +256,37 @@ namespace Neo.SmartContract
 
         private static bool VerifyWithdrawal(byte[] address, byte[] assetID)
         {
-            var interval = FaucetInterval();
-
             // Check individual cap
             var lastWithdrawn = Storage.Get(Context(), LastWithdrawnKey(address, assetID)).AsBigInteger();
-            if (lastWithdrawn != 0 && lastWithdrawn + interval > Runtime.Time) return false;
+            if (lastWithdrawn != 0 && lastWithdrawn + faucetInteveral > Runtime.Time) return false;
 
             // Check global cap
             var totalWithdrawn = Storage.Get(Context(), TotalWithdrawnKey(assetID)).AsBigInteger();
             var globalCap = Storage.Get(Context(), GlobalCapKey(assetID)).AsBigInteger();
             var startTime = Storage.Get(Context(), "startTime").AsBigInteger();
-            var intervalsSinceStart = (startTime - Runtime.Time) / interval + 1;
+            var intervalsSinceStart = (Runtime.Time - startTime) / faucetInteveral + 1;
             if (totalWithdrawn > globalCap * intervalsSinceStart) return false;
 
             return true;
         }
 
-        private static void MarkWithdrawal(byte[] address, byte[] assetID)
+        private static bool MarkWithdrawal(byte[] address, byte[] assetID)
         {
+            Runtime.Log("Checking Last Mark..");
+            if (!VerifyWithdrawal(address, assetID)) return false;
+
             Runtime.Log("Checking Last Mark..");
             var lastWithdrawnKey = LastWithdrawnKey(address, assetID);
             var lastWithdrawn = Storage.Get(Context(), lastWithdrawnKey).AsBigInteger();
-            if (lastWithdrawn == Runtime.Time) return; // save on Storage.Put
+            if (lastWithdrawn == Runtime.Time) return false; // save on Storage.Put
 
             Runtime.Log("Marking Withdrawal..");
             var totalWithdrawnKey = TotalWithdrawnKey(assetID);
             var totalWithdrawn = Storage.Get(Context(), totalWithdrawnKey).AsBigInteger();
             Storage.Put(Context(), totalWithdrawnKey, totalWithdrawn + IndividualCap(assetID));
             Storage.Put(Context(), LastWithdrawnKey(address, assetID), Runtime.Time);
+
+            return true;
         }
 
         private static bool WithdrawNEP5(byte[] address, byte[] assetID)
