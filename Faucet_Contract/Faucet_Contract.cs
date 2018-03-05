@@ -44,22 +44,24 @@ namespace Neo.SmartContract
             // Prepare vars
             var currentTxn = (Transaction)ExecutionEngine.ScriptContainer;
             var withdrawingAddr = GetWithdrawalAddress(currentTxn);
-            var NEP5AssetID = GetWithdrawalNEP5(currentTxn);
-            var isWithdrawingNEP5 = NEP5AssetID.Length == 20;
+            var assetID = GetWithdrawalAsset(currentTxn);
+            var isWithdrawingNEP5 = assetID.Length == 20;
             var inputs = currentTxn.GetInputs();
             var outputs = currentTxn.GetOutputs();
-            var assetID = outputs[0].ScriptHash;
+
+            // Check that the contract is active
+            if (GetState() != Active) return false;
 
             if (Runtime.Trigger == TriggerType.Verification)
             {
-                // Check that the contract is active
-                if (GetState() != Active) return false;
-
                 ulong totalOut = 0;
                 if (WithdrawalType(currentTxn) == Marking)
                 {
                     // Check that txn is signed
                     if (!Runtime.CheckWitness(withdrawingAddr)) return false;
+
+                    // Check that withdrawal is possible
+                    if (!VerifyWithdrawal(withdrawingAddr, assetID)) return false;
 
                     // Check that inputs are not already reserved
                     foreach (var i in inputs)
@@ -67,7 +69,7 @@ namespace Neo.SmartContract
                         if (Storage.Get(Context(), i.PrevHash.Concat(((BigInteger)i.PrevIndex).AsByteArray())).Length > 0) return false;
                     }
 
-                    // Check that withdrawal is possible, and outputs are a valid self-send
+                    // Check that outputs are a valid self-send
                     foreach (var o in outputs)
                     {
                         totalOut += (ulong)o.Value;
@@ -78,11 +80,6 @@ namespace Neo.SmartContract
                     {
                         if (inputs.Length > 1) return false;
                         if (outputs.Length > 2) return false;
-                        if (!VerifyWithdrawal(withdrawingAddr, NEP5AssetID)) return false;
-                    }
-                    else
-                    {
-                        if (!VerifyWithdrawal(withdrawingAddr, assetID)) return false;
                     }
                 }
                 else if (WithdrawalType(currentTxn) == Withdrawing)
@@ -140,23 +137,25 @@ namespace Neo.SmartContract
             else if (Runtime.Trigger == TriggerType.Application)
             {
                 if (WithdrawalType(currentTxn) == Marking)
-                {                    
+                {
+                    var amount = IndividualCap(assetID);
                     if (isWithdrawingNEP5)
                     {
                         Runtime.Log("Marking NEP5");
-                        MarkWithdrawal(withdrawingAddr, NEP5AssetID);
+                        MarkWithdrawal(withdrawingAddr, assetID, amount);
                         Storage.Put(Context(), currentTxn.Hash.Concat(new byte[1] { 0 }), withdrawingAddr);
                     }
                     else
                     {
                         Runtime.Log("Marking SystemAsset");
-                        MarkWithdrawal(withdrawingAddr, assetID);
+                        MarkWithdrawal(withdrawingAddr, assetID, amount);
                         BigInteger index = 0;
                         ulong sum = 0;
                         foreach (var o in outputs)
                         {
                             sum += (ulong)o.Value;
-                            if (sum <= IndividualCap(o.AssetId))
+                            Runtime.Log("output check..");
+                            if (sum <= amount)
                             {
                                 Runtime.Log("Reserving...");
                                 Storage.Put(Context(), currentTxn.Hash.Concat(index.AsByteArray()), withdrawingAddr);
@@ -181,7 +180,7 @@ namespace Neo.SmartContract
                 }
                 else if (WithdrawalType(currentTxn) == Transferring)
                 {
-                    WithdrawNEP5(withdrawingAddr, GetWithdrawalNEP5(currentTxn));
+                    WithdrawNEP5(withdrawingAddr, assetID);
                     return true;
                 }
 
@@ -254,7 +253,7 @@ namespace Neo.SmartContract
         {
             // Check individual cap
             var lastWithdrawn = Storage.Get(Context(), LastWithdrawnKey(address, assetID)).AsBigInteger();
-            if (lastWithdrawn != 0 && lastWithdrawn + faucetInteveral > Runtime.Time) return false;
+            if (lastWithdrawn + faucetInteveral > Runtime.Time) return false;
 
             // Check global cap
             var totalWithdrawn = Storage.Get(Context(), TotalWithdrawnKey(assetID)).AsBigInteger();
@@ -266,7 +265,7 @@ namespace Neo.SmartContract
             return true;
         }
 
-        private static bool MarkWithdrawal(byte[] address, byte[] assetID)
+        private static bool MarkWithdrawal(byte[] address, byte[] assetID, BigInteger amount)
         {
             Runtime.Log("Checking Last Mark..");
             if (!VerifyWithdrawal(address, assetID)) return false;
@@ -274,7 +273,7 @@ namespace Neo.SmartContract
             Runtime.Log("Marking Withdrawal..");
             var totalWithdrawnKey = TotalWithdrawnKey(assetID);
             var totalWithdrawn = Storage.Get(Context(), totalWithdrawnKey).AsBigInteger();
-            Storage.Put(Context(), totalWithdrawnKey, totalWithdrawn + IndividualCap(assetID));
+            Storage.Put(Context(), totalWithdrawnKey, totalWithdrawn + amount);
             Storage.Put(Context(), LastWithdrawnKey(address, assetID), Runtime.Time);
 
             return true;
@@ -311,12 +310,13 @@ namespace Neo.SmartContract
             return new byte[0] { };
         }
 
-        private static byte[] GetWithdrawalNEP5(Transaction transaction)
+        private static byte[] GetWithdrawalAsset(Transaction transaction)
         {
             var txnAttributes = transaction.GetAttributes();
             foreach (var attr in txnAttributes)
             {
-                if (attr.Usage == 0x21) return attr.Data.Take(20);
+                if (attr.Usage == 0xa2) return attr.Data.Take(20);
+                if (attr.Usage == 0xa3) return attr.Data;
             }
             return new byte[0] { };
         }
