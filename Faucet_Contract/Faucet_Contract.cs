@@ -48,6 +48,7 @@ namespace Neo.SmartContract
             var isWithdrawingNEP5 = NEP5AssetID.Length == 20;
             var inputs = currentTxn.GetInputs();
             var outputs = currentTxn.GetOutputs();
+            var assetID = outputs[0].ScriptHash;
 
             if (Runtime.Trigger == TriggerType.Verification)
             {
@@ -67,21 +68,21 @@ namespace Neo.SmartContract
                     }
 
                     // Check that withdrawal is possible, and outputs are a valid self-send
+                    foreach (var o in outputs)
+                    {
+                        totalOut += (ulong)o.Value;
+                        if (o.AssetId != assetID) return false;
+                        if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash) return false;
+                    }
                     if (isWithdrawingNEP5)
                     {
-                        totalOut += (ulong)outputs[0].Value;
-                        if (outputs.Length > 1) return false;
+                        if (inputs.Length > 1) return false;
+                        if (outputs.Length > 2) return false;
                         if (!VerifyWithdrawal(withdrawingAddr, NEP5AssetID)) return false;
-                        if (outputs[0].ScriptHash != ExecutionEngine.ExecutingScriptHash) return false;
                     }
                     else
                     {
-                        foreach (var o in outputs)
-                        {
-                            totalOut += (ulong)o.Value;
-                            if (!VerifyWithdrawal(withdrawingAddr, o.AssetId)) return false;
-                            if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash) return false;
-                        }
+                        if (!VerifyWithdrawal(withdrawingAddr, assetID)) return false;
                     }
                 }
                 else if (WithdrawalType(currentTxn) == Withdrawing)
@@ -92,20 +93,20 @@ namespace Neo.SmartContract
                         if (Storage.Get(Context(), i.PrevHash.Concat(((BigInteger)i.PrevIndex).AsByteArray())) != withdrawingAddr) return false;
                     }
 
-                    // Check withdrawal amount
+                    // Check withdrawal amount and destinations
+                    ulong amountWithdrawn = 0;
                     foreach (var o in outputs)
                     {
                         totalOut += (ulong)o.Value;
+                        if (o.AssetId != assetID) return false;
                         if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash)
                         {
+                            amountWithdrawn += (ulong)o.Value;
                             // Only can withdraw to the marked addr
                             if (o.ScriptHash != withdrawingAddr) return false;
-
-                            // TODO: optimize this using Map
-                            var amountWithdrawn = GetAmountForAssetInOutputs(o.AssetId, outputs);
-                            if (amountWithdrawn > IndividualCap(o.AssetId)) return false;
                         }
                     }
+                    if (amountWithdrawn != IndividualCap(assetID)) return false;
                 }
                 else if (WithdrawalType(currentTxn) == Transferring)
                 {
@@ -118,6 +119,7 @@ namespace Neo.SmartContract
                     foreach (var o in outputs)
                     {
                         totalOut += (ulong)o.Value;
+                        if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash) return false;
                     }
                 }
                 else
@@ -147,22 +149,19 @@ namespace Neo.SmartContract
                     }
                     else
                     {
-                        // TODO: use Map when avaiable in neo-compiler
-                        // var assets = new Dictionary<byte[], BigInteger>();
                         Runtime.Log("Marking SystemAsset");
+                        MarkWithdrawal(withdrawingAddr, assetID);
                         BigInteger index = 0;
                         ulong sum = 0;
                         foreach (var o in outputs)
                         {
-                            // assets.TryGetValue(o.AssetId, out BigInteger sum);
-                            MarkWithdrawal(withdrawingAddr, o.AssetId);
-                            if (sum == 0 || sum + (ulong)o.Value <= IndividualCap(o.AssetId))
+                            sum += (ulong)o.Value;
+                            if (sum <= IndividualCap(o.AssetId))
                             {
                                 Runtime.Log("Reserving...");
                                 Storage.Put(Context(), currentTxn.Hash.Concat(index.AsByteArray()), withdrawingAddr);
                             }
                             index += 1;
-                            // assets.Add(o.AssetId, sum + o.Value);
                         }
                     }
                     return true;
@@ -188,12 +187,6 @@ namespace Neo.SmartContract
 
                 if (operation == "initialize")
                 {
-                    if (!Runtime.CheckWitness(Owner))
-                    {
-                        Runtime.Log("Owner signature verification failed!");
-                        return false;
-                    }
-                    Runtime.Log("initialized");
                     return Initialize();
                 }
                 if (GetState() == Pending)
@@ -203,14 +196,11 @@ namespace Neo.SmartContract
                 }
                 if (operation == "getIndividualCap")
                 {
-                    Runtime.Log("Get individual cap");
-                    var cap = IndividualCap((byte[])args[0]);
-                    return cap;
+                    return IndividualCap((byte[])args[0]);
                 }
                 if (operation == "getLastWithdrawTime")
                 {
-                    var time = Storage.Get(Context(), LastWithdrawnKey((byte[])args[0], (byte[])args[1])).AsBigInteger();
-                    return time;
+                    return Storage.Get(Context(), LastWithdrawnKey((byte[])args[0], (byte[])args[1])).AsBigInteger();
                 }
 
                 // == Owner ==
@@ -245,6 +235,12 @@ namespace Neo.SmartContract
 
         private static bool Initialize()
         {
+            if (!Runtime.CheckWitness(Owner))
+            {
+                Runtime.Log("Owner signature verification failed!");
+                return false;
+            }
+
             if (GetState() != Pending) return false;
 
             Storage.Put(Context(), "state", Active);
@@ -275,11 +271,6 @@ namespace Neo.SmartContract
             Runtime.Log("Checking Last Mark..");
             if (!VerifyWithdrawal(address, assetID)) return false;
 
-            Runtime.Log("Checking Last Mark..");
-            var lastWithdrawnKey = LastWithdrawnKey(address, assetID);
-            var lastWithdrawn = Storage.Get(Context(), lastWithdrawnKey).AsBigInteger();
-            if (lastWithdrawn == Runtime.Time) return false; // save on Storage.Put
-
             Runtime.Log("Marking Withdrawal..");
             var totalWithdrawnKey = TotalWithdrawnKey(assetID);
             var totalWithdrawn = Storage.Get(Context(), totalWithdrawnKey).AsBigInteger();
@@ -306,17 +297,6 @@ namespace Neo.SmartContract
             Withdrawn(address, assetID, amount);
 
             return true;
-        }
-
-        private static ulong GetAmountForAssetInOutputs(byte[] assetID, TransactionOutput[] outputs)
-        {
-            ulong amount = 0;
-            foreach (var o in outputs)
-            {
-                if (o.AssetId == assetID && o.ScriptHash != ExecutionEngine.ExecutingScriptHash) amount += (ulong)o.Value;
-            }
-
-            return amount;
         }
 
         private static byte[] GetWithdrawalAddress(Transaction transaction)
