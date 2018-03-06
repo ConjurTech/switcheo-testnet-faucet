@@ -31,9 +31,9 @@ namespace Neo.SmartContract
         private static readonly byte[] Transferring = { 0x52 }; // NEP-5
 
         // Other Settings
-        public static readonly byte[] Owner = "AHDfSLZANnJ4N9Rj3FCokP14jceu3u7Bvw".ToScriptHash();
+        private static readonly byte[] Owner = "AHDfSLZANnJ4N9Rj3FCokP14jceu3u7Bvw".ToScriptHash();
+        private static readonly byte[] gasAssetID = { 231, 45, 40, 105, 121, 238, 108, 177, 183, 230, 93, 253, 223, 178, 227, 132, 16, 11, 141, 20, 142, 119, 88, 222, 66, 228, 22, 139, 113, 121, 44, 96 };
         private const ulong faucetInteveral = 3600; // 1 hour
-        private const ulong assetFactor = 100000000; // for neo and gas
 
         private static StorageContext Context() => Storage.CurrentContext;
         private static byte[] GetState() => Storage.Get(Context(), "state");
@@ -49,11 +49,11 @@ namespace Neo.SmartContract
             var inputs = currentTxn.GetInputs();
             var outputs = currentTxn.GetOutputs();
 
-            // Check that the contract is active
-            if (GetState() != Active) return false;
-
             if (Runtime.Trigger == TriggerType.Verification)
             {
+                // Check that the contract is active
+                if (GetState() != Active) return false;
+
                 ulong totalOut = 0;
                 if (WithdrawalType(currentTxn) == Marking)
                 {
@@ -73,13 +73,23 @@ namespace Neo.SmartContract
                     foreach (var o in outputs)
                     {
                         totalOut += (ulong)o.Value;
-                        if (o.AssetId != assetID) return false;
                         if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash) return false;
+                        if (isWithdrawingNEP5)
+                        {
+                            if (o.AssetId != gasAssetID) return false;
+                        }
+                        else
+                        {
+                            if (o.AssetId != assetID) return false;
+                        }
                     }
+
+                    // Check that NEP5 withdrawals don't reserve more utxos than required
                     if (isWithdrawingNEP5)
                     {
                         if (inputs.Length > 1) return false;
                         if (outputs.Length > 2) return false;
+                        if (outputs[0].Value > 1) return false;
                     }
                 }
                 else if (WithdrawalType(currentTxn) == Withdrawing)
@@ -149,18 +159,16 @@ namespace Neo.SmartContract
                     {
                         Runtime.Log("Marking SystemAsset");
                         MarkWithdrawal(withdrawingAddr, assetID, amount);
-                        BigInteger index = 0;
                         ulong sum = 0;
-                        foreach (var o in outputs)
+                        for (int index = 0; index < outputs.Length; index++)
                         {
-                            sum += (ulong)o.Value;
+                            sum += (ulong)outputs[index].Value;
                             Runtime.Log("output check..");
                             if (sum <= amount)
                             {
                                 Runtime.Log("Reserving...");
-                                Storage.Put(Context(), currentTxn.Hash.Concat(index.AsByteArray()), withdrawingAddr);
+                                Storage.Put(Context(), currentTxn.Hash.Concat(((BigInteger)index).AsByteArray()), withdrawingAddr);
                             }
-                            index += 1;
                         }
                     }
                     return true;
