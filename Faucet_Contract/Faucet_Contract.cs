@@ -16,6 +16,9 @@ namespace Neo.SmartContract
         [DisplayName("withdrawn")]
         public static event Action<byte[], byte[], BigInteger> Withdrawn; // (address, assetID, amount)
 
+        [DisplayName("withdrawing")]
+        public static event Action<byte[], byte[], BigInteger> Withdrawing; // (address, assetID, amount)
+
         // Contract States
         private static readonly byte[] Pending = { };         // only can initialize
         private static readonly byte[] Active = { 0x01 };     // all operations active
@@ -27,17 +30,13 @@ namespace Neo.SmartContract
         private static readonly byte[] LastWithdrawn = { 0x12 };
         private static readonly byte[] TotalWithdrawn = { 0x13 };        
         private static readonly byte[] Marking = { 0x50 };
-        private static readonly byte[] Withdrawing = { 0x51 }; // SystemAsset
-        private static readonly byte[] Transferring = { 0x52 }; // NEP-5
+        private static readonly byte[] Withdraw = { 0x51 }; // SystemAsset
+        private static readonly byte[] Transfer = { 0x52 }; // NEP-5
 
         // Other Settings
         private static readonly byte[] Owner = "AHDfSLZANnJ4N9Rj3FCokP14jceu3u7Bvw".ToScriptHash();
         private static readonly byte[] gasAssetID = { 231, 45, 40, 105, 121, 238, 108, 177, 183, 230, 93, 253, 223, 178, 227, 132, 16, 11, 141, 20, 142, 119, 88, 222, 66, 228, 22, 139, 113, 121, 44, 96 };
         private const ulong faucetInteveral = 3600; // 1 hour
-
-        private static StorageContext Context() => Storage.CurrentContext;
-        private static byte[] GetState() => Storage.Get(Context(), "state");
-        private static BigInteger IndividualCap(byte[] assetID) => Storage.Get(Context(), IndividualCapKey(assetID)).AsBigInteger();
 
         public static Object Main(string operation, params object[] args)
         {
@@ -66,7 +65,7 @@ namespace Neo.SmartContract
                     // Check that inputs are not already reserved
                     foreach (var i in inputs)
                     {
-                        if (Storage.Get(Context(), i.PrevHash.Concat(((BigInteger)i.PrevIndex).AsByteArray())).Length > 0) return false;
+                        if (Storage.Get(Context(), i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex))).Length > 0) return false;
                     }
 
                     // Check that outputs are a valid self-send
@@ -83,6 +82,7 @@ namespace Neo.SmartContract
                             if (o.AssetId != assetID) return false;
                         }
                     }
+                    // TODO: should also check outputs.Length for SystemAsset (at most +1 of required)
 
                     // Check that NEP5 withdrawals don't reserve more utxos than required
                     if (isWithdrawingNEP5)
@@ -92,35 +92,29 @@ namespace Neo.SmartContract
                         if (outputs[0].Value > 1) return false;
                     }
                 }
-                else if (WithdrawalType(currentTxn) == Withdrawing)
+                else if (WithdrawalType(currentTxn) == Withdraw)
                 {
                     // Check that utxo has been reserved
                     foreach (var i in inputs)
                     {
-                        if (Storage.Get(Context(), i.PrevHash.Concat(((BigInteger)i.PrevIndex).AsByteArray())) != withdrawingAddr) return false;
+                        if (Storage.Get(Context(), i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex))) != withdrawingAddr) return false;
                     }
 
                     // Check withdrawal amount and destinations
-                    ulong amountWithdrawn = 0;
                     foreach (var o in outputs)
                     {
                         totalOut += (ulong)o.Value;
                         if (o.AssetId != assetID) return false;
-                        if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash)
-                        {
-                            amountWithdrawn += (ulong)o.Value;
-                            // Only can withdraw to the marked addr
-                            if (o.ScriptHash != withdrawingAddr) return false;
-                        }
+                        if (o.ScriptHash != withdrawingAddr) return false;
                     }
-                    if (amountWithdrawn != IndividualCap(assetID)) return false;
+                    if (totalOut != IndividualCap(assetID)) return false;
                 }
-                else if (WithdrawalType(currentTxn) == Transferring)
+                else if (WithdrawalType(currentTxn) == Transfer)
                 {
                     // Check that utxo has been reserved
                     foreach (var i in inputs)
                     {
-                        if (Storage.Get(Context(), i.PrevHash.Concat(((BigInteger)i.PrevIndex).AsByteArray())) != withdrawingAddr) return false;
+                        if (Storage.Get(Context(), i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex))) != withdrawingAddr) return false;
                     }
 
                     foreach (var o in outputs)
@@ -140,7 +134,7 @@ namespace Neo.SmartContract
                 foreach (var i in currentTxn.GetReferences()) totalIn += (ulong)i.Value;
                 if (totalIn != totalOut) return false;
 
-                // TODO: Check that Application trigger will be called
+                // TODO: Check that Application trigger will be tail called
 
                 return true;
             }
@@ -171,24 +165,25 @@ namespace Neo.SmartContract
                             }
                         }
                     }
+                    Withdrawing(withdrawingAddr, assetID, amount);
                     return true;
                 }
-                else if (WithdrawalType(currentTxn) == Withdrawing)
+                else if (WithdrawalType(currentTxn) == Withdraw)
                 {
-                    // Check that utxo has been reserved
                     foreach (var i in inputs)
                     {
-                        Storage.Delete(Context(), i.PrevHash.Concat(((BigInteger)i.PrevIndex).AsByteArray()));
+                        //Runtime.Notify("del", i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex)));
+                        Storage.Delete(Context(), i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex)));
                     }
-                    foreach (var o in outputs)
-                    {
-                        if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash) Withdrawn(o.ScriptHash, o.AssetId, o.Value);
-                    }
+                    var amount = IndividualCap(assetID);
+                    Withdrawn(withdrawingAddr, assetID, IndividualCap(assetID));
                     return true;
                 }
-                else if (WithdrawalType(currentTxn) == Transferring)
+                else if (WithdrawalType(currentTxn) == Transfer)
                 {
-                    WithdrawNEP5(withdrawingAddr, assetID);
+                    var amount = IndividualCap(assetID);
+                    WithdrawNEP5(withdrawingAddr, assetID, amount);
+                    Withdrawn(withdrawingAddr, assetID, amount);
                     return true;
                 }
 
@@ -287,10 +282,9 @@ namespace Neo.SmartContract
             return true;
         }
 
-        private static bool WithdrawNEP5(byte[] address, byte[] assetID)
+        private static bool WithdrawNEP5(byte[] address, byte[] assetID, BigInteger amount)
         {
             // Transfer token
-            var amount = IndividualCap(assetID);
             var args = new object[] { ExecutionEngine.ExecutingScriptHash, address, amount };
             var contract = (NEP5Contract)assetID.ToDelegate();
             bool transferSuccessful = (bool)contract("transfer", args);
@@ -299,9 +293,6 @@ namespace Neo.SmartContract
                 Runtime.Log("Failed to transfer NEP-5 tokens!");
                 return false;
             }
-
-            // Notify clients
-            Withdrawn(address, assetID, amount);
 
             return true;
         }
@@ -341,6 +332,13 @@ namespace Neo.SmartContract
             return new byte[0] { };
         }
 
+        // Helpers
+        private static StorageContext Context() => Storage.CurrentContext;
+        private static byte[] GetState() => Storage.Get(Context(), "state");
+        private static BigInteger IndividualCap(byte[] assetID) => Storage.Get(Context(), IndividualCapKey(assetID)).AsBigInteger();
+        private static byte[] IndexAsByteArray(ushort index) => index > 0 ? ((BigInteger)index).AsByteArray() : new byte[1] { 0 };
+
+        // Keys
         private static byte[] GlobalCapKey(byte[] assetID) => Global.Concat(assetID);
         private static byte[] IndividualCapKey(byte[] assetID) => Individual.Concat(assetID);
         private static byte[] LastWithdrawnKey(byte[] originator, byte[] assetID) => LastWithdrawn.Concat(assetID).Concat(originator);
