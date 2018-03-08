@@ -96,7 +96,7 @@ namespace Neo.SmartContract
                     // Check that utxo has been reserved
                     foreach (var i in inputs)
                     {
-                        //if (Storage.Get(Context(), i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex))) != withdrawingAddr) return false;
+                        if (Storage.Get(Context(), i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex))) != withdrawingAddr) return false;
                     }
 
                     // Check withdrawal destinations
@@ -110,7 +110,8 @@ namespace Neo.SmartContract
                     }
 
                     // Check withdrawal amount
-                    if (!isWithdrawingNEP5 && totalOut != IndividualCap(assetID)) return false;
+                    var authorizedAmount = isWithdrawingNEP5 ? 1 : IndividualCap(assetID);
+                    if (totalOut != authorizedAmount) return false;
                 }
                 else
                 {
@@ -136,21 +137,21 @@ namespace Neo.SmartContract
                     {
                         Runtime.Log("Marking NEP5");
                         MarkWithdrawal(withdrawingAddr, assetID, amount);
-                        Storage.Put(Context(), currentTxn.Hash.Concat(new byte[1] { 0 }), withdrawingAddr);
+                        Storage.Put(Context(), currentTxn.Hash.Concat(IndexAsByteArray(0)), withdrawingAddr);
                     }
                     else
                     {
                         Runtime.Log("Marking SystemAsset");
                         MarkWithdrawal(withdrawingAddr, assetID, amount);
                         ulong sum = 0;
-                        for (int index = 0; index < outputs.Length; index++)
+                        for (ushort index = 0; index < outputs.Length; index++)
                         {
                             sum += (ulong)outputs[index].Value;
-                            Runtime.Log("output check..");
+                            Runtime.Log("Output check..");
                             if (sum <= amount)
                             {
                                 Runtime.Log("Reserving...");
-                                Storage.Put(Context(), currentTxn.Hash.Concat(((BigInteger)index).AsByteArray()), withdrawingAddr);
+                                Storage.Put(Context(), currentTxn.Hash.Concat(IndexAsByteArray(index)), withdrawingAddr);
                             }
                         }
                     }
@@ -161,7 +162,6 @@ namespace Neo.SmartContract
                 {
                     foreach (var i in inputs)
                     {
-                        Runtime.Notify("del", i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex)));
                         Storage.Delete(Context(), i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex)));
                     }
                     var amount = IndividualCap(assetID);
@@ -317,7 +317,7 @@ namespace Neo.SmartContract
         private static StorageContext Context() => Storage.CurrentContext;
         private static byte[] GetState() => Storage.Get(Context(), "state");
         private static BigInteger IndividualCap(byte[] assetID) => Storage.Get(Context(), IndividualCapKey(assetID)).AsBigInteger();
-        private static byte[] IndexAsByteArray(ushort index) => index > 0 ? ((BigInteger)index).AsByteArray() : new byte[1] { 0 };
+        private static byte[] IndexAsByteArray(ushort index) => index > 0 ? ((BigInteger)index).AsByteArray() : new byte[0] { };
 
         // Keys
         private static byte[] GlobalCapKey(byte[] assetID) => Global.Concat(assetID);
