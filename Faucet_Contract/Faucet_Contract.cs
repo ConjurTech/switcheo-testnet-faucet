@@ -29,9 +29,13 @@ namespace Neo.SmartContract
         private static readonly byte[] Global = { 0x11 };
         private static readonly byte[] LastWithdrawn = { 0x12 };
         private static readonly byte[] TotalWithdrawn = { 0x13 };        
-        private static readonly byte[] Marking = { 0x50 };
-        private static readonly byte[] Withdraw = { 0x51 }; // SystemAsset
-        private static readonly byte[] Transfer = { 0x52 }; // NEP-5
+        private static readonly byte[] Mark = { 0x50 };
+        private static readonly byte[] Withdraw = { 0x51 };
+        private static readonly byte TAUsage_WithdrawalStage = 0xa1;
+        private static readonly byte TAUsage_NEP5AssetID = 0xa2;
+        private static readonly byte TAUsage_SystemAssetID = 0xa3;
+        private static readonly byte TAUsage_WithdrawalAddress = 0xa4;
+        private static readonly byte TAUsage_AdditionalWitness = 0x20; // additional verification script which can be used to ensure any withdrawal txns are intended by the owner
 
         // Other Settings
         private static readonly byte[] Owner = "AHDfSLZANnJ4N9Rj3FCokP14jceu3u7Bvw".ToScriptHash();
@@ -42,7 +46,8 @@ namespace Neo.SmartContract
         {
             // Prepare vars
             var currentTxn = (Transaction)ExecutionEngine.ScriptContainer;
-            var withdrawingAddr = GetWithdrawalAddress(currentTxn);
+            var withdrawalStage = WithdrawalStage(currentTxn);
+            var withdrawingAddr = GetWithdrawalAddress(currentTxn, withdrawalStage);
             var assetID = GetWithdrawalAsset(currentTxn);
             var isWithdrawingNEP5 = assetID.Length == 20;
             var inputs = currentTxn.GetInputs();
@@ -54,7 +59,7 @@ namespace Neo.SmartContract
                 if (GetState() != Active) return false;
 
                 ulong totalOut = 0;
-                if (WithdrawalType(currentTxn) == Marking)
+                if (withdrawalStage == Mark)
                 {
                     // Check that txn is signed
                     if (!Runtime.CheckWitness(withdrawingAddr)) return false;
@@ -69,18 +74,12 @@ namespace Neo.SmartContract
                     }
 
                     // Check that outputs are a valid self-send
+                    var authorizedAssetID = isWithdrawingNEP5 ? gasAssetID : assetID;
                     foreach (var o in outputs)
                     {
                         totalOut += (ulong)o.Value;
                         if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash) return false;
-                        if (isWithdrawingNEP5)
-                        {
-                            if (o.AssetId != gasAssetID) return false;
-                        }
-                        else
-                        {
-                            if (o.AssetId != assetID) return false;
-                        }
+                        if (o.AssetId != authorizedAssetID) return false;
                     }
                     // TODO: should also check outputs.Length for SystemAsset (at most +1 of required)
 
@@ -92,36 +91,26 @@ namespace Neo.SmartContract
                         if (outputs[0].Value > 1) return false;
                     }
                 }
-                else if (WithdrawalType(currentTxn) == Withdraw)
+                else if (withdrawalStage == Withdraw)
                 {
                     // Check that utxo has been reserved
                     foreach (var i in inputs)
                     {
-                        if (Storage.Get(Context(), i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex))) != withdrawingAddr) return false;
+                        //if (Storage.Get(Context(), i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex))) != withdrawingAddr) return false;
                     }
 
-                    // Check withdrawal amount and destinations
+                    // Check withdrawal destinations
+                    var authorizedAssetID = isWithdrawingNEP5 ? gasAssetID : assetID;
+                    var authorizedAddress = isWithdrawingNEP5 ? ExecutionEngine.ExecutingScriptHash : withdrawingAddr; 
                     foreach (var o in outputs)
                     {
                         totalOut += (ulong)o.Value;
-                        if (o.AssetId != assetID) return false;
-                        if (o.ScriptHash != withdrawingAddr) return false;
-                    }
-                    if (totalOut != IndividualCap(assetID)) return false;
-                }
-                else if (WithdrawalType(currentTxn) == Transfer)
-                {
-                    // Check that utxo has been reserved
-                    foreach (var i in inputs)
-                    {
-                        if (Storage.Get(Context(), i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex))) != withdrawingAddr) return false;
+                        if (o.AssetId != authorizedAssetID) return false;
+                        if (o.ScriptHash != authorizedAddress) return false;
                     }
 
-                    foreach (var o in outputs)
-                    {
-                        totalOut += (ulong)o.Value;
-                        if (o.ScriptHash != ExecutionEngine.ExecutingScriptHash) return false;
-                    }
+                    // Check withdrawal amount
+                    if (!isWithdrawingNEP5 && totalOut != IndividualCap(assetID)) return false;
                 }
                 else
                 {
@@ -140,7 +129,7 @@ namespace Neo.SmartContract
             }
             else if (Runtime.Trigger == TriggerType.Application)
             {
-                if (WithdrawalType(currentTxn) == Marking)
+                if (withdrawalStage == Mark)
                 {
                     var amount = IndividualCap(assetID);
                     if (isWithdrawingNEP5)
@@ -168,21 +157,15 @@ namespace Neo.SmartContract
                     Withdrawing(withdrawingAddr, assetID, amount);
                     return true;
                 }
-                else if (WithdrawalType(currentTxn) == Withdraw)
+                else if (withdrawalStage == Withdraw)
                 {
                     foreach (var i in inputs)
                     {
-                        //Runtime.Notify("del", i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex)));
+                        Runtime.Notify("del", i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex)));
                         Storage.Delete(Context(), i.PrevHash.Concat(IndexAsByteArray(i.PrevIndex)));
                     }
                     var amount = IndividualCap(assetID);
-                    Withdrawn(withdrawingAddr, assetID, IndividualCap(assetID));
-                    return true;
-                }
-                else if (WithdrawalType(currentTxn) == Transfer)
-                {
-                    var amount = IndividualCap(assetID);
-                    WithdrawNEP5(withdrawingAddr, assetID, amount);
+                    if (isWithdrawingNEP5 && !WithdrawNEP5(withdrawingAddr, assetID, amount)) return false;
                     Withdrawn(withdrawingAddr, assetID, amount);
                     return true;
                 }
@@ -298,14 +281,13 @@ namespace Neo.SmartContract
             return true;
         }
 
-        private static byte[] GetWithdrawalAddress(Transaction transaction)
+        private static byte[] GetWithdrawalAddress(Transaction transaction, byte[] withdrawalStage)
         {
+            var usage = withdrawalStage == Mark ? TAUsage_AdditionalWitness : TAUsage_WithdrawalAddress;
             var txnAttributes = transaction.GetAttributes();
             foreach (var attr in txnAttributes)
             {
-                // This is the additional verification script which can be used
-                // to ensure any withdrawal txns are intended by the owner.
-                if (attr.Usage == 0x20) return attr.Data.Take(20);
+                if (attr.Usage == usage) return attr.Data.Take(20);
             }
             return new byte[0] { };
         }
@@ -315,21 +297,19 @@ namespace Neo.SmartContract
             var txnAttributes = transaction.GetAttributes();
             foreach (var attr in txnAttributes)
             {
-                if (attr.Usage == 0xa2) return attr.Data.Take(20);
-                if (attr.Usage == 0xa3) return attr.Data;
+                if (attr.Usage == TAUsage_NEP5AssetID) return attr.Data.Take(20);
+                if (attr.Usage == TAUsage_SystemAssetID) return attr.Data;
             }
             return new byte[0] { };
         }
 
-        private static byte[] WithdrawalType(Transaction transaction)
+        private static byte[] WithdrawalStage(Transaction transaction)
         {
-            // Check that the transaction is marked as a SystemAsset withdrawal
             var txnAttributes = transaction.GetAttributes();
             foreach (var attr in txnAttributes)
             {
-                if (attr.Usage == 0xa1) return attr.Data.Take(1);
+                if (attr.Usage == TAUsage_WithdrawalStage) return attr.Data.Take(1);
             }
-
             return new byte[0] { };
         }
 
