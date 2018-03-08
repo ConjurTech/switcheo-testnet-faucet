@@ -257,6 +257,7 @@ namespace Neo.SmartContract
             // Check individual cap
             var lastWithdrawn = Storage.Get(Context(), LastWithdrawnKey(address, assetID)).AsBigInteger();
             if (lastWithdrawn + faucetInteveral > Runtime.Time) return false;
+            if (IndividualCap(assetID) == 0) return false;
 
             // Check global cap
             var totalWithdrawn = Storage.Get(Context(), TotalWithdrawnKey(assetID)).AsBigInteger();
